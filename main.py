@@ -70,14 +70,16 @@ def parse_xml(tmp_path: pathlib.Path) -> Tuple[List[Tuple[str, str]], List[Tuple
     return id_and_level, id_and_object_name
 
 
-def store_csv(tmp_path: pathlib.Path, id_and_level: List[Tuple[str, str]], id_and_object_name: List[Tuple[str, str]]):
+def store_csv(tmp_path: pathlib.Path):
+    first_csv_data, second_csv_data = parse_xml(tmp_path)
+
     path = tmp_path / 'fisrt.csv'
     with path.open("w", encoding="utf-8") as file:
-        csv.writer(file, delimiter=',', quoting=csv.QUOTE_ALL).writerows(id_and_level)
+        csv.writer(file, delimiter=',', quoting=csv.QUOTE_ALL).writerows(first_csv_data)
 
     path = tmp_path / 'second.csv'
     with path.open("w", encoding="utf-8") as file:
-        csv.writer(file, delimiter=',', quoting=csv.QUOTE_ALL).writerows(id_and_object_name)
+        csv.writer(file, delimiter=',', quoting=csv.QUOTE_ALL).writerows(second_csv_data)
 
 
 def run_context():
@@ -85,10 +87,7 @@ def run_context():
         tmp_path = pathlib.Path(tmp)
 
         store_xml(tmp_path)
-
-        first_csv_data, second_csv_data = parse_xml(tmp_path)
-
-        store_csv(tmp_path, first_csv_data, second_csv_data)
+        store_csv(tmp_path)
 
 
 if __name__ == '__main__':
