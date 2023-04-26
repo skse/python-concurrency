@@ -7,9 +7,10 @@ import tempfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from functools import partial
+from itertools import islice
 from typing import Optional, List, Tuple
 from uuid import uuid4
-from xml.etree.ElementTree import Element, SubElement, fromstring, ElementTree
+from xml.etree.ElementTree import Element, SubElement, fromstring, tostring, ElementTree
 
 from utils import time_it, try_open_file_manager
 
@@ -17,7 +18,7 @@ from utils import time_it, try_open_file_manager
 def _generate_xml_content(
     index: int,
     nesting: Optional[int]
-) -> Tuple[int, ElementTree]:
+) -> Tuple[int, bytes]:
     """
     Populates XML template with random data.
     :param index: represents output file's name
@@ -25,26 +26,24 @@ def _generate_xml_content(
     :return: tuple consisting of the file index & bytes string representing its content (populated XML)
     """
     root = Element('root')
-    tree = ElementTree(root)
     SubElement(root, "var", attrib={'name': 'id', 'value': str(uuid4())})
     SubElement(root, "var", attrib={'name': 'level', 'value': str(random.randint(1, 100))})
     objects = SubElement(root, "objects")
     for _ in range(nesting or random.randint(1, 10)):
         SubElement(objects, "object", attrib={'name': ''.join(random.choices(string.ascii_uppercase, k=20))})
-    return index, tree
+    return index, tostring(root)
 
 
-def _blocking_write(z: zipfile.ZipFile, item: Tuple[int, ElementTree]):
-    name, tree = item
-    with z.open(f'{name}.xml', 'w') as f:
-        tree.write(f, encoding='UTF-8', xml_declaration=True)
+def _blocking_write(zf: zipfile.ZipFile, item: Tuple[int, bytes]):
+    name, content = item
+    zf.writestr(f'{name}.xml', content)
 
 
 def _zip(path: pathlib.Path, chunk):
     path = path / f'{chunk[0][0]}.zip'
     with zipfile.ZipFile(path, 'w') as z:
         for item in chunk:
-            _blocking_write(z, item)  # ZipFile doesn't support concurrent writes anyway
+            _blocking_write(z, item)  # sadly, ZipFile doesn't support concurrent writes out of the box
 
 
 @time_it
@@ -57,24 +56,23 @@ def store_zip(
     process_pool: ProcessPoolExecutor
 ):
     """
-    Creates XML content & stores it via zip containers in local filesystem.
+    Concurrently creates XML content & stores it via zip containers in local filesystem.
     :param tmp_path: temp dir to save files to
     :param zip_count: Number of zip files to be created. I/O & CPU bound param.
     :param xml_count: Number of XML files to be created. I/O bound param.
     :param xml_nesting: Number of objects nested within each XML file. CPU bound param.
+    :param thread_pool: thread pool instance
+    :param process_pool: process pool instance
     """
-
-    # Testing note: currently, this function doesn't seem to benefit much from using threads or processes.
-    # This might be related to the fact that we await for the list of content to dispatch it chunks; however,
-    # even if it would be consumed lazily, it's often slower that zip & file persisting (also depending on params).
-    # More importantly, ZipFile is not really lean to concurrent processing.
-    contents = list(map(
+    # tested vs plain .map() via python main.py -z 50 -c 20 -n 1000
+    contents = process_pool.map(
         partial(_generate_xml_content, nesting=xml_nesting),
         [i for i in range(zip_count * xml_count)]
-    ))
+    )
 
-    chunks = [contents[i:i + xml_count] for i in range(0, len(contents), xml_count)]
-    list(map(partial(_zip, tmp_path), chunks))
+    chunks = (list(islice(contents, xml_count)) for _ in range(zip_count))
+    # tested vs plain .map() via python main.py -z 1000 -c 1 -n 1000
+    list(thread_pool.map(partial(_zip, tmp_path), chunks))
 
     assert len(list(tmp_path.iterdir())) == zip_count  # sanity check
 
@@ -109,7 +107,7 @@ def store_csv(tmp_path: pathlib.Path, thread_pool: ThreadPoolExecutor, process_p
     :param process_pool: process pool instance
     """
     first_csv_data, second_csv_data = [], []
-    
+
     bytes_lists = thread_pool.map(_blocking_read, tmp_path.iterdir())
     for pair in process_pool.map(_parse_xml, (content for bytes_list in bytes_lists for content in bytes_list)):
         first_csv_data.append(pair[0])
@@ -134,7 +132,7 @@ def run_context(args: argparse.Namespace):
     process_pool = ProcessPoolExecutor()
 
     tempdir = tempfile.TemporaryDirectory()
-    
+
     try:
         tmp_path = pathlib.Path(tempdir.name)
 
@@ -161,21 +159,21 @@ if __name__ == '__main__':
         dest='zip_count',
         action='store',
         default=50,
-        help='How many zip files will be created (default: 50)'
+        help='How many zip files will be created (default: 50). I/O + CPU-bounded param'
     )
     parser.add_argument(
         '-c',
         dest='xml_count',
         action='store',
         default=100,
-        help='How many XML files will be created per zip file (default: 100)'
+        help='How many XML files will be created per zip file (default: 100). I/O-bounded param'
     )
     parser.add_argument(
         '-n',
         dest='xml_nesting',
         action='store',
         default=None,
-        help='How nested each XML will be (default: random [1..10])'
+        help='How nested each XML will be (default: random [1..10]). CPU-bounded param'
     )
     parser.add_argument(
         '--view',
