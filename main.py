@@ -4,19 +4,20 @@ import pathlib
 import random
 import string
 import tempfile
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from functools import partial
 from typing import Optional, List, Tuple
 from uuid import uuid4
-from xml.etree.ElementTree import Element, SubElement, tostring, fromstring
+from xml.etree.ElementTree import Element, SubElement, fromstring, ElementTree
 
 from utils import time_it, try_open_file_manager
 
 
 def _generate_xml_content(
-        index: int,
-        nesting: Optional[int]
-) -> Tuple[int, bytes]:
+    index: int,
+    nesting: Optional[int]
+) -> Tuple[int, ElementTree]:
     """
     Populates XML template with random data.
     :param index: represents output file's name
@@ -24,45 +25,63 @@ def _generate_xml_content(
     :return: tuple consisting of the file index & bytes string representing its content (populated XML)
     """
     root = Element('root')
+    tree = ElementTree(root)
     SubElement(root, "var", attrib={'name': 'id', 'value': str(uuid4())})
     SubElement(root, "var", attrib={'name': 'level', 'value': str(random.randint(1, 100))})
     objects = SubElement(root, "objects")
     for _ in range(nesting or random.randint(1, 10)):
         SubElement(objects, "object", attrib={'name': ''.join(random.choices(string.ascii_uppercase, k=20))})
-    return index, tostring(root)
+    return index, tree
 
 
-def _blocking_write(tmp_path: pathlib.Path, meta: Tuple[int, bytes]):
-    name, content = meta
-    path = tmp_path / f'{name}.xml'
-    path.write_bytes(content)
+def _blocking_write(z: zipfile.ZipFile, item: Tuple[int, ElementTree]):
+    name, tree = item
+    with z.open(f'{name}.xml', 'w') as f:
+        tree.write(f, encoding='UTF-8', xml_declaration=True)
+
+
+def _zip(path: pathlib.Path, chunk):
+    path = path / f'{chunk[0][0]}.zip'
+    with zipfile.ZipFile(path, 'w') as z:
+        for item in chunk:
+            _blocking_write(z, item)  # ZipFile doesn't support concurrent writes anyway
 
 
 @time_it
-def store_xml(
+def store_zip(
     tmp_path: pathlib.Path,
+    zip_count: int,
     xml_count: int,
     xml_nesting: Optional[int],
     thread_pool: ThreadPoolExecutor,
     process_pool: ProcessPoolExecutor
 ):
     """
-    Concurrently creates XML content & stores it in local filesystem.
+    Creates XML content & stores it via zip containers in local filesystem.
     :param tmp_path: temp dir to save files to
+    :param zip_count: Number of zip files to be created. I/O & CPU bound param.
     :param xml_count: Number of XML files to be created. I/O bound param.
     :param xml_nesting: Number of objects nested within each XML file. CPU bound param.
-    :param thread_pool: thread pool instance
-    :param process_pool: process pool instance
     """
 
-    data = process_pool.map(partial(_generate_xml_content, nesting=xml_nesting), (i for i in range(xml_count)))
-    list(thread_pool.map(partial(_blocking_write, tmp_path), data))
+    # Testing note: currently, this function doesn't seem to benefit much from using threads or processes.
+    # This might be related to the fact that we await for the list of content to dispatch it chunks; however,
+    # even if it would be consumed lazily, it's often slower that zip & file persisting (also depending on params).
+    # More importantly, ZipFile is not really lean to concurrent processing.
+    contents = list(map(
+        partial(_generate_xml_content, nesting=xml_nesting),
+        [i for i in range(zip_count * xml_count)]
+    ))
 
-    assert len(list(tmp_path.iterdir())) == xml_count  # sanity check
+    chunks = [contents[i:i + xml_count] for i in range(0, len(contents), xml_count)]
+    list(map(partial(_zip, tmp_path), chunks))
+
+    assert len(list(tmp_path.iterdir())) == zip_count  # sanity check
 
 
-def _blocking_read(path: pathlib.Path) -> bytes:
-    return path.read_bytes()
+def _blocking_read(path: pathlib.Path) -> List[bytes]:
+    with zipfile.ZipFile(path, 'r') as zf:
+        return list(path.read_bytes() for path in zipfile.Path(zf).iterdir())
 
 
 def _parse_xml(content: bytes) -> Tuple[Tuple[str, str], List[Tuple[str, str]]]:
@@ -83,7 +102,7 @@ def _parse_xml(content: bytes) -> Tuple[Tuple[str, str], List[Tuple[str, str]]]:
 @time_it
 def store_csv(tmp_path: pathlib.Path, thread_pool: ThreadPoolExecutor, process_pool: ProcessPoolExecutor):
     """
-    Concurrently fetches all XML files from given dir, calculates some meta based on their contents
+    Concurrently fetches all XML files from zips in given dir and calculates some meta based on their content
     & stores it in two CSV files.
     :param tmp_path: temp dir to save files to
     :param thread_pool: thread pool instance
@@ -91,8 +110,8 @@ def store_csv(tmp_path: pathlib.Path, thread_pool: ThreadPoolExecutor, process_p
     """
     first_csv_data, second_csv_data = [], []
     
-    bytes_list = thread_pool.map(_blocking_read, tmp_path.iterdir())
-    for pair in process_pool.map(_parse_xml, bytes_list):
+    bytes_lists = thread_pool.map(_blocking_read, tmp_path.iterdir())
+    for pair in process_pool.map(_parse_xml, (content for bytes_list in bytes_lists for content in bytes_list)):
         first_csv_data.append(pair[0])
         second_csv_data.extend(pair[1])
 
@@ -107,6 +126,7 @@ def store_csv(tmp_path: pathlib.Path, thread_pool: ThreadPoolExecutor, process_p
 
 
 def run_context(args: argparse.Namespace):
+    zip_count = int(args.zip_count)
     xml_count = int(args.xml_count)
     xml_nesting = int(args.xml_nesting) if args.xml_nesting else None
 
@@ -118,10 +138,10 @@ def run_context(args: argparse.Namespace):
     try:
         tmp_path = pathlib.Path(tempdir.name)
 
-        store_xml(tmp_path, xml_count, xml_nesting, thread_pool, process_pool)
+        store_zip(tmp_path, zip_count, xml_count, xml_nesting, thread_pool, process_pool)
         store_csv(tmp_path, thread_pool, process_pool)
 
-        assert len(list(tmp_path.iterdir())) == xml_count + 2  # sanity check
+        assert len(list(tmp_path.iterdir())) == zip_count + 2  # sanity check
     except Exception as e:
         print(f'Something went totally wrong: {e}')
     finally:
@@ -137,11 +157,18 @@ def run_context(args: argparse.Namespace):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Run a script demonstrating I/O & CPU bound process load.')
     parser.add_argument(
+        '-z',
+        dest='zip_count',
+        action='store',
+        default=50,
+        help='How many zip files will be created (default: 50)'
+    )
+    parser.add_argument(
         '-c',
         dest='xml_count',
         action='store',
-        default=50,
-        help='How many XML files will be crated (default: 50)'
+        default=100,
+        help='How many XML files will be created per zip file (default: 100)'
     )
     parser.add_argument(
         '-n',
