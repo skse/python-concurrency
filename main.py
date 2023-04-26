@@ -1,5 +1,6 @@
 import argparse
 import csv
+import itertools
 import pathlib
 import random
 import string
@@ -7,10 +8,9 @@ import tempfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from functools import partial
-from itertools import islice
 from typing import Optional, List, Tuple
 from uuid import uuid4
-from xml.etree.ElementTree import Element, SubElement, fromstring, tostring, ElementTree
+from xml.etree.ElementTree import Element, SubElement, fromstring, tostring
 
 from utils import time_it, try_open_file_manager
 
@@ -58,9 +58,9 @@ def store_zip(
     """
     Concurrently creates XML content & stores it via zip containers in local filesystem.
     :param tmp_path: temp dir to save files to
-    :param zip_count: Number of zip files to be created. I/O & CPU bound param.
-    :param xml_count: Number of XML files to be created. I/O bound param.
-    :param xml_nesting: Number of objects nested within each XML file. CPU bound param.
+    :param zip_count: number of zip files to be created.
+    :param xml_count: number of XML files to be created.
+    :param xml_nesting: number of objects nested within each XML file.
     :param thread_pool: thread pool instance
     :param process_pool: process pool instance
     """
@@ -70,16 +70,22 @@ def store_zip(
         [i for i in range(zip_count * xml_count)]
     )
 
-    chunks = (list(islice(contents, xml_count)) for _ in range(zip_count))
+    chunks = (list(itertools.islice(contents, xml_count)) for _ in range(zip_count))
     # tested vs plain .map() via python main.py -z 1000 -c 1 -n 1000
     list(thread_pool.map(partial(_zip, tmp_path), chunks))
 
     assert len(list(tmp_path.iterdir())) == zip_count  # sanity check
 
 
-def _blocking_read(path: pathlib.Path) -> List[bytes]:
+def _concurrent_read(path: pathlib.Path) -> List[bytes]:
+    """
+    Looks like https://github.com/python/cpython/pull/26974 has been backported to Python 3.9 and on,
+    so we can try using concurrent reads
+    :param path: zip file path
+    :return: list of bytes content
+    """
     with zipfile.ZipFile(path, 'r') as zf:
-        return list(path.read_bytes() for path in zipfile.Path(zf).iterdir())
+        return list(map(zf.read, zf.namelist()))
 
 
 def _parse_xml(content: bytes) -> Tuple[Tuple[str, str], List[Tuple[str, str]]]:
@@ -108,12 +114,15 @@ def store_csv(tmp_path: pathlib.Path, thread_pool: ThreadPoolExecutor, process_p
     """
     first_csv_data, second_csv_data = [], []
 
-    bytes_lists = thread_pool.map(_blocking_read, tmp_path.iterdir())
-    for pair in process_pool.map(_parse_xml, (content for bytes_list in bytes_lists for content in bytes_list)):
+    # tested vs plain .map() via python main.py -z 4000 -c 1 -n 10
+    nested_bytes_iter = thread_pool.map(_concurrent_read, tmp_path.iterdir())
+
+    # tested vs plain .map() via python main.py -z 1 -c 1000 -n 1000
+    for pair in process_pool.map(_parse_xml, itertools.chain(*nested_bytes_iter)):
         first_csv_data.append(pair[0])
         second_csv_data.extend(pair[1])
 
-    #  number of CSV files is known & constant, so it seems like an overkill to write them concurrently
+    #  number of CSV files is known & constant, so it seems like an overkill to write these two concurrently
     path = tmp_path / 'first.csv'
     with path.open("w", encoding="utf-8", newline='') as file:
         csv.writer(file, delimiter=',', quoting=csv.QUOTE_ALL).writerows(first_csv_data)
@@ -124,8 +133,8 @@ def store_csv(tmp_path: pathlib.Path, thread_pool: ThreadPoolExecutor, process_p
 
 
 def run_context(args: argparse.Namespace):
-    zip_count = int(args.zip_count)
-    xml_count = int(args.xml_count)
+    zip_count = args.zip_count
+    xml_count = args.xml_count
     xml_nesting = int(args.xml_nesting) if args.xml_nesting else None
 
     thread_pool = ThreadPoolExecutor()
@@ -153,19 +162,21 @@ def run_context(args: argparse.Namespace):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Run a script demonstrating I/O & CPU bound process load.')
+    parser = argparse.ArgumentParser(description='Run a script demonstrating I/O & CPU-bounded process execution time.')
     parser.add_argument(
         '-z',
         dest='zip_count',
         action='store',
         default=50,
-        help='How many zip files will be created (default: 50). I/O + CPU-bounded param'
+        type=int,
+        help='How many zip files will be created (default: 50). I/O & CPU-bounded param'
     )
     parser.add_argument(
         '-c',
         dest='xml_count',
         action='store',
         default=100,
+        type=int,
         help='How many XML files will be created per zip file (default: 100). I/O-bounded param'
     )
     parser.add_argument(
