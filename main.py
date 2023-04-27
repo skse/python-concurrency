@@ -112,24 +112,22 @@ def store_csv(tmp_path: pathlib.Path, thread_pool: ThreadPoolExecutor, process_p
     :param thread_pool: thread pool instance
     :param process_pool: process pool instance
     """
-    first_csv_data, second_csv_data = [], []
+    custom_open = partial(open, mode="w", encoding="utf-8", newline='')
+    writer = partial(csv.writer, delimiter=',', quoting=csv.QUOTE_ALL)
 
-    # tested vs plain .map() via python main.py -z 4000 -c 1 -n 10
-    nested_bytes_iter = thread_pool.map(_concurrent_read, tmp_path.iterdir())
+    zip_paths = (path for path in tmp_path.iterdir() if path.name.endswith('.zip'))
 
-    # tested vs plain .map() via python main.py -z 1 -c 1000 -n 1000
-    for pair in process_pool.map(_parse_xml, itertools.chain(*nested_bytes_iter)):
-        first_csv_data.append(pair[0])
-        second_csv_data.extend(pair[1])
+    with (
+        custom_open((tmp_path / 'first.csv')) as first_csv,
+        custom_open((tmp_path / 'second.csv')) as second_csv,
+    ):
+        # tested vs plain .map() via python main.py -z 4000 -c 1 -n 10
+        nested_bytes_iter = thread_pool.map(_concurrent_read, zip_paths)
 
-    #  number of CSV files is known & constant, so it seems like an overkill to write these two concurrently
-    path = tmp_path / 'first.csv'
-    with path.open("w", encoding="utf-8", newline='') as file:
-        csv.writer(file, delimiter=',', quoting=csv.QUOTE_ALL).writerows(first_csv_data)
-
-    path = tmp_path / 'second.csv'
-    with path.open("w", encoding="utf-8", newline='') as file:
-        csv.writer(file, delimiter=',', quoting=csv.QUOTE_ALL).writerows(second_csv_data)
+        # tested vs plain .map() via python main.py -z 1 -c 1000 -n 1000
+        for pair in process_pool.map(_parse_xml, itertools.chain(*nested_bytes_iter)):
+            writer(first_csv).writerow(pair[0])
+            writer(second_csv).writerows(pair[1])
 
 
 def run_context(args: argparse.Namespace):

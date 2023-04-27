@@ -33,9 +33,9 @@ Contrary, `main.py` will use thread / process pools to deal with I/O / CPU bound
 
 `python main.py -z 50 -c 20 -n 1000 --view`
 
-    Execution time for store_zip function is: 4.128933 s
-    Execution time for store_csv function is: 5.079964 s
-    You can view the output directory at C:\Users\skse\AppData\Local\Temp\tmpvih53_70
+    Execution time for store_zip function is: 3.437540 s
+    Execution time for store_csv function is: 4.693735 s
+    You can view the output directory at C:\Users\skse\AppData\Local\Temp\tmpccqrmyq2
     Press enter to delete temp files...
 
 Examples above were calculated using
