@@ -15,7 +15,7 @@ from xml.etree.ElementTree import Element, SubElement, fromstring, tostring
 from utils import time_it, try_open_file_manager
 
 
-def _generate_xml_content(
+def _parallel_generate_xml_content(
     index: int,
     nesting: Optional[int]
 ) -> Tuple[int, bytes]:
@@ -39,7 +39,7 @@ def _blocking_write(zf: zipfile.ZipFile, item: Tuple[int, bytes]):
     zf.writestr(f'{name}.xml', content)
 
 
-def _zip(path: pathlib.Path, chunk):
+def _concurrent_zip(path: pathlib.Path, chunk):
     path = path / f'{chunk[0][0]}.zip'
     with zipfile.ZipFile(path, 'w') as z:
         for item in chunk:
@@ -56,7 +56,7 @@ def store_zip(
     process_pool: ProcessPoolExecutor
 ):
     """
-    Concurrently creates XML content & stores it via zip containers in local filesystem.
+    Creates XML content in parallel & concurrently stores it via zip containers in local filesystem.
     :param tmp_path: temp dir to save files to
     :param zip_count: number of zip files to be created.
     :param xml_count: number of XML files to be created.
@@ -66,13 +66,13 @@ def store_zip(
     """
     # tested vs plain .map() via python main.py -z 50 -c 20 -n 1000
     contents = process_pool.map(
-        partial(_generate_xml_content, nesting=xml_nesting),
+        partial(_parallel_generate_xml_content, nesting=xml_nesting),
         [i for i in range(zip_count * xml_count)]
     )
 
     chunks = (list(itertools.islice(contents, xml_count)) for _ in range(zip_count))
     # tested vs plain .map() via python main.py -z 1000 -c 1 -n 1000
-    list(thread_pool.map(partial(_zip, tmp_path), chunks))
+    list(thread_pool.map(partial(_concurrent_zip, tmp_path), chunks))
 
     assert len(list(tmp_path.iterdir())) == zip_count  # sanity check
 
@@ -88,7 +88,7 @@ def _concurrent_read(path: pathlib.Path) -> List[bytes]:
         return list(map(zf.read, zf.namelist()))
 
 
-def _parse_xml(content: bytes) -> Tuple[Tuple[str, str], List[Tuple[str, str]]]:
+def _parallel_parse_xml(content: bytes) -> Tuple[Tuple[str, str], List[Tuple[str, str]]]:
     """
     Read XML content & calculate associated meta.
     :param content: XML content string
@@ -125,7 +125,7 @@ def store_csv(tmp_path: pathlib.Path, thread_pool: ThreadPoolExecutor, process_p
         nested_bytes_iter = thread_pool.map(_concurrent_read, zip_paths)
 
         # tested vs plain .map() via python main.py -z 1 -c 1000 -n 1000
-        for pair in process_pool.map(_parse_xml, itertools.chain(*nested_bytes_iter)):
+        for pair in process_pool.map(_parallel_parse_xml, itertools.chain(*nested_bytes_iter)):
             writer(first_csv).writerow(pair[0])
             writer(second_csv).writerows(pair[1])
 
